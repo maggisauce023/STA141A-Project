@@ -1,0 +1,444 @@
+---
+title: "STA141AProject"
+author: "Maggie Nguyen"
+date: "2025-03-11"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Abstract
+For this project, 18 sessions of data from an experiment studying the neural activity of mice are used to find trends, differences, and similarities in the data. The structure of the data, the neural activity of the mice, the results from each trial, and the changes between trials will all be analyzed and used with the goal of creating a predictive model. The trends found in the exploratory data analysis will help with integrating the data by finding patterns and differences to make the prediction model more accurate. The prediction model made at the end of the project will focus on predicting the feedback outcome of the mice's reactions to the stimulus.
+
+# Introduction
+This project analyzes data from an experiment conducted by Steinmetz et al. (2019) that consists of 39 sessions studying the neural activity of ten mice. However, this project will focus only on sessions 1 through 18 and four mice: Cori, Forssmann, Hench, and Lederberg. Each session has several hundred trials. In one trial, visual stimuli are presented on the two screens placed on either side of the mouse being experimented on. The stimuli were measured in contrast levels: 0, 0.25, 0.5, and 1, with 0 being no stimulus. There is a wheel placed in front of the mice, and based on the stimulus contrast on the two screens, the mice must control the wheel a certain way. The mice would receive a reward or penalty depending on whether they passed or failed the test. If the left contrast is greater than the right contrast, the mice succeed by turning the wheel right. If the right contrast is greater than the left contrast, the mice succeed by turning the wheel left. If the left and right contrast are both zero, the mice succeed by keeping the wheel still. Lastly, if the left and right contrast are equal but nonzero, turning the wheel left or right will be randomly chosen as the correct answer, making the chance of success for this scenario 50%. The neural activity in the mice's brains was recorded by timestamps that correspond to neuron firing and the area of the visual cortex the neuron is in.  
+
+```{r}
+suppressMessages(library(tidyverse))
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(readr)
+suppressMessages(library(kableExtra))
+library(ggfortify)
+suppressMessages(library(gridExtra)) ## to organize the plots prettier
+suppressMessages(library(randomForest))
+suppressMessages(library(pROC))
+```
+
+```{r}
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+  }
+```
+
+# Exploratory Analysis
+
+This portion of the project will be used to observe the data set as a whole and visualize the structure of sessions and trials.
+
+### Data Format
+Each session has hundreds of trials. The trials consist of these variables:  
+* `feedback_type` : success (-1) or failure (1)  
+* `contrast_left` : the contrast of the left stimulus (0, 0.25, 0.5, 1)  
+* `contrast_right` : the contrast of the right stimulus (0, 0.25, 0.5, 1)  
+* `time` : centers of time bins when a neuron spikes  
+* `spks` : numbers of neuron spikes in time bins  
+* `brain_area` : area of the brain where the neurons spike  
+
+
+```{r}
+## table to summarize the data
+n.session=length(session)
+
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  date_exp =rep('dt',n.session),
+  n_brain_area = rep(0,n.session),
+  n_neurons = rep(0,n.session),
+  n_trials = rep(0,n.session),
+  success_rate = rep(0,n.session)
+)
+
+for(i in 1:n.session){
+  tmp = session[[i]];
+  meta[i,1]=tmp$mouse_name;
+  meta[i,2]=tmp$date_exp;
+  meta[i,3]=length(unique(tmp$brain_area));
+  meta[i,4]=dim(tmp$spks[[1]])[1];
+  meta[i,5]=length(tmp$feedback_type);
+  meta[i,6]=mean(tmp$feedback_type+1)/2;
+}
+
+kable(meta, format = "html", table.attr = "class='table table-striped'", digits = 2, col.names = c("Mouse Name", "Experiment Date", "Total Brain Areas", "Total Neurons", "Total Trials", "Success Rate"), caption = "Basic Information for the 18 Sessions")
+```
+
+This table organizes information from the 18 sessions into six columns. The name of the mouse experimented on, the date of the experiment, the total number of brain areas affected, the number of neurons, the number of trials, and the success rate. Using this basic information and further analyzing it, I will create plots and graphs to help visualize the data to identify patterns and trends to assist in creating the predictive model.
+
+To understand the structure of each session of data, I will be analyzing session 6. From the table above, session 6 works with the mouse Forssmann. There are 1169 neurons located in 5 areas of Forssmann's brain; AUD, CA1, root, SSp, and TH. There are 290 trials made in session 6 with success rate of 0.74.
+
+First, I will analyze how the contrasts of the stimulus affect feedback type and success rate.
+
+```{r}
+## combine all left_contrast, right_contrast, and success rate data
+all_data <- data.frame()
+
+for (i in 1:length(session)) {
+  tmp_data <- data.frame(
+    mouse = session[[i]]$mouse_name,
+    left_contrast = session[[i]]$contrast_left,
+    right_contrast = session[[i]]$contrast_right,
+    success = ifelse(session[[i]]$feedback_type == 1, 1, 0)
+  )
+  all_data <- rbind(all_data, tmp_data)
+}
+
+## organize the left_contrast, right_contrast, and success rate data based on mouse in a table to make heatmap
+mouse_success_table <- all_data %>%
+  group_by(mouse, left_contrast, right_contrast) %>%
+  summarise(
+    trials = n(),
+    success_rate = mean(success),
+    .groups = "drop"
+  ) %>%
+  arrange(mouse, desc(success_rate))
+
+## heatmaps for each mouse visualizing the success rate depending on left/right contrast
+plots_list <- list()
+
+for (m in unique(all_data$mouse)) {
+  mouse_data <- filter(mouse_success_table, mouse == m)
+  
+  plot <- ggplot(mouse_data, aes(x = left_contrast, y = right_contrast, fill = success_rate)) +
+    geom_tile() +
+    scale_fill_gradient(low = "blue", high = "red") +
+    labs(
+      title = paste(m),
+      x = "Left Contrast",
+      y = "Right Contrast",
+      fill = "Success Rate"
+    ) +
+    theme_minimal()
+  
+  plots_list[[m]] <- plot
+}
+
+grid.arrange(grobs = plots_list[1:4], ncol = 2)
+```
+
+This heat map displays the success rate for each of the four mice, depending on the left and right contrast of the stimuli. The red colors represent a higher success rate and the blue colors represent a lower success rate. Observing the patterns of the four heat maps, the blue colors appear more in the diagonal from (0, 0) to (1, 1), and the red colors appear outside of this diagonal. This pattern makes sense because due to the design of the experiment, when the left and right stimulus is equal to zero, the turning the wheel left or right is randomly chosen, so the mice will always have a 50% chance to succeed.
+
+```{r}
+## table for success rate depending on left/right contrast
+combined_success_table <- all_data %>%
+  group_by(left_contrast, right_contrast) %>%
+  summarise(
+    trials = n(),
+    success_rate = mean(success),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(success_rate))
+
+combined_success_table %>%
+  kable(format = "html", digits = 2, caption = "Success Rate by Left/Right Contrast") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+This table shows the same information as the heat maps, but it shows the exact success rate based on left and right contrast for all of the mice. Just like the heat map, this table shows that the success rate is lowest when left and right contrasts are nonzero and equal to each other. The success rates are 0.45, 0.49, and 0.57, which are all approximately 50%. As mentioned previously, this makes sense due to the design of the experiment. Another observation to be made from this table is that the success rates are highest when the difference between left and right contrast is large. For example, when left contrast is 1 and right contrast is 0, the success rate is 0.84. The success rates decrease when the difference between left and right contrast becomes smaller. Therefore, it is easier for the mice to make a correct decision when the two screens are more differentiable, and it is hardest when the screens display the same, nonzero contrast.
+
+Next, I will analyze how neuron spikes and brain area affect feedback type.
+
+```{r}
+## plot for average spike counts for each trial
+i.s=6
+
+i.t=1
+
+spk.trial = session[[i.s]]$spks[[i.t]]
+area=session[[i.s]]$brain_area
+
+spk.count=apply(spk.trial,1,sum)
+
+for(i in 1:dim(spk.trial)[1]){
+  spk.count[i]=sum(spk.trial[i,])
+  }
+
+tmp <- data.frame(
+  area = area,
+  spikes = spk.count
+)
+
+spk.average.dplyr =tmp %>%
+  group_by(area) %>%
+  summarize(mean= mean(spikes))
+
+average_spike_area<-function(i.t,this_session){
+  spk.trial = this_session$spks[[i.t]]
+  area= this_session$brain_area
+  spk.count=apply(spk.trial,1,sum)
+  spk.average.tapply=tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+  }
+
+n.trial=length(session[[i.s]]$feedback_type)
+n.area=length(unique(session[[i.s]]$brain_area ))
+
+trial.summary =matrix(nrow=n.trial,ncol= n.area+1+2+1)
+for(i.t in 1:n.trial){
+  trial.summary[i.t,]=c(average_spike_area(i.t,this_session = session[[i.s]]),
+                          session[[i.s]]$feedback_type[i.t],
+                        session[[i.s]]$contrast_left[i.t],
+                        session[[i.s]]$contrast_right[i.s],
+                        i.t)
+}
+
+colnames(trial.summary)=c(names(average_spike_area(i.t,this_session = session[[i.s]])), 'feedback', 'left contr.','right contr.','id' )
+
+trial.summary <- as_tibble(trial.summary)
+
+area.col=rainbow(n=n.area,alpha=0.7)
+plot(x=1,y=0, col='white',xlim=c(0,n.trial),ylim=c(0,4), xlab="Trials",ylab="Average spike counts", main=paste("Spikes per area in Session", i.s))
+
+for(i in 1:n.area){
+  lines(y=trial.summary[[i]],x=trial.summary$id,col=area.col[i],lty=2,lwd=1)
+  lines(smooth.spline(trial.summary$id, trial.summary[[i]]),col=area.col[i],lwd=3)
+  }
+legend("topright", 
+  legend = colnames(trial.summary)[1:n.area], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8
+)
+
+## showing feedback type for each trial
+feedback_colors <- ifelse(trial.summary$feedback == 1, "green", "red")
+points(trial.summary$id, rep(-0.1, length(trial.summary$id)), col = feedback_colors, pch = 19, cex = 1.2)
+legend("topleft", legend = c("Success", "Failure"), col = c("green", "red"), pch = 19, cex = 0.8)
+legend("topright", legend = colnames(trial.summary)[1:n.area], col = area.col, lty = 1, cex = 0.8)
+```
+
+To view the data at a session level, this graph displays the spikes per brain area in session 6. The x-axis represents the trial number and the y-axis represents the average spike count. There are 5 brain areas affected in session 6, and the legend on the top right shows which brain area corresponds to which color. The dashed lines show the average spike count for each trial and the solid lines show the trend of the spike counts as trials continue. The green and red dots on the bottom of the graph represent the feedback type of each trial; green for success or red for failure. Observing the dashed lines, the average spike counts ranges from approximately 0 to 4 depending on which brain area the neuron is in. Although the solid line for CA1 is the smoothest, the dashed lines for CA1 show the most fluctuation compared to the other brain areas. The sudden jump in average spike count in CA1 could be due to Forssmann learning and training its brain. All of the lines follow a slight downward trend, showing that the average spike counts decrease as more trials are made. This decreasing pattern could be due to fatigue or the effects of Forssmann's learning because as it learns about the experiment, it no longer needs to train its brain as aggressively.
+
+```{r}
+## plot for neuron spikes over time in two trials
+plot.trial<-function(i.t,area, area.col,this_session){
+    
+    spks=this_session$spks[[i.t]];
+    n.neuron=dim(spks)[1]
+    time.points=this_session$time[[i.t]]
+    
+    plot(0,0,xlim=c(min(time.points),max(time.points)),ylim=c(0,n.neuron+1),col='white', xlab='Time (s)',yaxt='n', ylab='Neuron', main=paste('Trial ',i.t, 'feedback', this_session$feedback_type[i.t] ),cex.lab=1.5)
+    for(i in 1:n.neuron){
+        i.a=which(area== this_session$brain_area[i]);
+        col.this=area.col[i.a]
+        
+        ids.spike=which(spks[i,]>0)
+        if( length(ids.spike)>0 ){
+            points(x=time.points[ids.spike],y=rep(i, length(ids.spike) ),pch='.',cex=2, col=col.this)
+        }
+    }
+    
+legend("topright", 
+  legend = area, 
+  col = area.col, 
+  pch = 16, 
+  cex = 0.8
+  )
+}
+
+varname=names(trial.summary);
+area=varname[1:(length(varname)-4)]
+par(mfrow=c(1,2))
+plot.trial(4,area, area.col,session[[i.s]])
+plot.trial(5,area, area.col,session[[i.s]])
+```
+
+To view the data at a trial level, this plot displays the time each neuron spiked and its corresponding brain area for two trials; trial 4, where Forssmann succeeds in the task, and trial 5, where Forssmann fails. The x-axis represents the time the neuron spiked and the y-axis represents individual neurons. Each row on the y-axis a different neuron, so some rows have multiple points because the same neuron spiked at different times. Like the previous graph, the points are color coded to differentiate which brain area the neurons are from. From these two graphs, we can observe that the density of points for trial 4 is much greater than in trial 5. This means Forssmann's brain was much more active in trial 4 than trial 5. In this experiment, the mice are given a reward for a successful trial, so Forssman's neurons were spiking much more in trial 4 in order to successfully complete the trial.
+
+```{r}
+all_sessions <- list()
+
+num_sessions <- length(session)
+
+for (i.s in 1:num_sessions) {
+  if (is.null(session[[i.s]]) || length(session[[i.s]]$spks) == 0) next  
+  
+  n.trial = length(session[[i.s]]$feedback_type)
+  
+  trial_summary <- data.frame(
+    trial_id = 1:n.trial,
+    mean_spike = numeric(n.trial),
+    session_id = i.s
+  )
+  
+  for (i.t in 1:n.trial) {
+    spk.trial = session[[i.s]]$spks[[i.t]]
+    
+    if (is.null(spk.trial) || length(spk.trial) == 0) {
+      trial_summary$mean_spike[i.t] = NA
+      next
+    }
+    
+    spk.count = rowSums(spk.trial)
+    trial_summary$mean_spike[i.t] = mean(spk.count)
+  }
+ 
+  all_sessions[[i.s]] <- trial_summary
+}
+
+final_data <- bind_rows(all_sessions)
+
+final_data <- na.omit(final_data)
+
+ggplot(final_data, aes(x = trial_id, y = mean_spike)) +
+  geom_col(fill = "black") +
+  geom_smooth(color = "blue", method = "loess", se = FALSE, size = 1) +
+  facet_wrap(~session_id, scales = "free_x", ncol = 5) + 
+  theme_minimal() +
+  labs(x = "Trial", y = "Average Spike Count") +
+  theme(strip.text = element_text(size = 12))
+```
+
+Lastly, to observe the trend of average spike count across all 18 sessions, a simplified version of the graph of average spike count for session 6 is made for all 18 sessions. The difference between these graphs and the previous graph of session 6 is that the brain area is not included. These graphs show the average spike count across all brain areas associated with the session. The black lines in these graphs represent the average spike count for individual trials, while the solid blue line represents the trend of the spike counts as trials continue.
+
+### Summary
+Analyzing the affect of contrast on success rate using all four mice's data, it is observed that a higher difference in left and right contrast results in higher success rate, while a the lowest success rates occur when the contrasts are the same and nonzero. Observing the neuron data at a session level, session 6 shows a downwards trend of average spike count as trials continue. This is likely the cause of Forssmann, the mouse being experimented on in session 6, growing fatigued, or the effects of learning. At a trial level, trial 4 of session 6 shows a lot more neurons spiking compared to trial 5. This is likely due to trial 4 being a success, so Forssmann's correct decision making caused more neuron spiking.
+
+# Data Integration
+For this portion of the project, I will simplify the data by using a portion of it to help with creating the final predictive model. The subset will be chosen depending on the average neuron spike trends. As we observed earlier, session 6 shows a slight downwards trend. The previous diagram shows the average spike count across trials for all 18 sessions. Focusing on the blue line for each session, most show a downwards trend similar to, or even stronger than session 6. Therefore, the subset of data I will use will consist of all sessions where the average neuron spike count decreases as trials continue. Compared to the other sessions, session 6's trend is not as strong, so it will not be included. The subset used for data integration will include sessions 1, 3, 5, 8, 9, 11, 14, 15, 17 and 18.
+
+```{r}
+## subset of data
+selected_sessions <- c(1, 3, 5, 8, 9, 11, 14, 15, 17, 18)
+
+subset_data <- data.frame()
+
+for (i in selected_sessions) {
+  tmp_data <- data.frame(
+    session = i,
+    mouse = session[[i]]$mouse_name,
+    left_contrast = session[[i]]$contrast_left,
+    right_contrast = session[[i]]$contrast_right,
+    feedback_type = session[[i]]$feedback_type,
+    avg_spike_count = sapply(session[[i]]$spks, mean)
+  )
+  subset_data <- rbind(subset_data, tmp_data)
+}
+```
+
+```{r}
+## clustering
+numeric_data <- subset_data %>% select(where(is.numeric))
+
+numeric_data <- numeric_data %>% mutate(across(everything(), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
+scaled_data <- scale(numeric_data)
+
+set.seed(100)
+wss <- sapply(1:10, function(k) kmeans(scaled_data, centers = k, nstart = 10)$tot.withinss)
+
+qplot(1:10, wss, geom = "line") + 
+  geom_point() +
+  labs(title = "Elbow Method for K-Means", x = "Number of Clusters", y = "Total Within-Cluster Sum of Squares")
+
+kmeans_result <- kmeans(scaled_data, centers = 5, nstart = 10)
+
+subset_data$cluster <- as.factor(kmeans_result$cluster)
+```
+This graph plots the within-cluster sum of squares, or WCSS for short, for each cluster. The "elbow" method refers to choosing the number of clusters based on the elbow point of the graph, which is where the curve bends the most. Observing the graph, the albow point appears to be at 5.0 clusters. Therefore, for principal component analysis, I will be using 5 clusters to visualize the data.
+
+```{r}
+pca_result <- prcomp(scaled_data, center = TRUE, scale. = TRUE)
+pca_data <- as.data.frame(pca_result$x)
+
+# Add cluster labels
+pca_data$cluster <- subset_data$cluster
+
+# Plot PCA with clusters
+ggplot(pca_data, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.8, size = 3) +
+  labs(title = "PCA Clustering Scatterplot", x = "PC1", y = "PC2") +
+  theme_minimal()
+```
+This plot shows the PCA clustering of the data. The x-axis represents the first principal component and the y-axis represents the second principle component. The points are plotted based on the direction of the highest (PC1) and second highest (PC2) variance. The different colors represent the five different clusters. From this plot, it is clear that there is significant overlap. This means the data does not have distinctive groupings.
+
+# Predictive Modeling
+
+```{r}
+
+subset_data$feedback_type <- as.factor(subset_data$feedback_type)
+
+set.seed(200)
+train_indices <- sample(1:nrow(subset_data), 0.7 * nrow(subset_data))
+train_data <- subset_data[train_indices, ]
+test_data <- subset_data[-train_indices, ]
+
+rf_model <- randomForest(feedback_type ~ mouse + left_contrast + right_contrast + avg_spike_count, 
+                         data = train_data, 
+                         ntree = 500, 
+                         mtry = sqrt(ncol(train_data) - 1), 
+                         importance = TRUE)
+
+predictions <- predict(rf_model, test_data)
+confusion_matrix <- table(predictions, test_data$feedback_type)
+print(confusion_matrix)
+```
+The values of this confusion matrix shows the accuracy of predicting feedback type. The top row of -1 and 1 represents the predicted values, and the left column of -1 and 1 represents the actual values. This means the top left entry represents true negatives, the top right entry represents false positives, bottom left is false negatives, and bottom right is false positives. This means the model correctly predicted  negative feedback 34 times and positive feedback 544 times. The model incorrectly predicted negative feedback 191 times and positive feedback 29 times. Therefore, the model is much better at predicting a positive feedback than negative.
+
+# Prediction Performance on the Test Data Sets
+
+Now, I will apply the test data to the prediction model to find the accuracy of the model.
+```{r}
+## test data
+test=list()
+for(i in 1:2){
+  test[[i]]=readRDS(paste('./Test/test',i,'.rds',sep=''))
+}
+
+combined_test <- rbind(test[[1]], test[[2]])
+```
+
+```{r}
+# Split the data into training and testing sets
+set.seed(300)
+train_indices <- sample(1:nrow(subset_data), 0.7 * nrow(subset_data))
+train_data <- subset_data[train_indices, ]
+test_data <- subset_data[-train_indices, ]
+
+# Train the Random Forest model
+rf_model <- randomForest(feedback_type ~ mouse + left_contrast + right_contrast + avg_spike_count, 
+                         data = train_data, 
+                         ntree = 500, 
+                         mtry = sqrt(ncol(train_data) - 1), 
+                         importance = TRUE)
+
+# Predict on the test data
+predictions <- predict(rf_model, test_data)
+
+# Calculate accuracy
+confusion_matrix <- table(predictions, test_data$feedback_type)
+print(confusion_matrix)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Accuracy:", accuracy))
+
+# Get predicted probabilities for the positive class
+predicted_probabilities <- predict(rf_model, test_data, type = "prob")[, 2]
+
+# Calculate ROC and AUC
+roc_curve <- roc(test_data$feedback_type, predicted_probabilities)
+plot(roc_curve, main = "ROC Curve", col = "blue", lwd = 2)
+auc_value <- auc(roc_curve)
+print(paste("AUC:", auc_value))
+```
+The model is 73.31% accurate when predicting the feedback type of the test data. The area under the curve (AUC) is 0.6585, which is poor, but decent because it greater than 0.5.  
+The the y-axis of the ROC curve represents the true positive rate (TPR) and the x-axis represents the false positive rate (FPR). The beginning of the ROC curves follows a steep pattern, which is desirable because it means the TPR is greater than FPR. However, near the end of the curve, the curve begins to flatten out, meaning the FPR is increasing.
+
+### Summary
+The final prediction model produced an AUC of 0.6585, which means the model is slightly better than guessing. The accuracy is 73.33%, which is not great, but the model will predict most of the results correctly. 
+
+# Discussion
+This project was a challenge because of the overwhelming and complex structure of the data. I found it especially intriguing how every mouse, session, and trial are very unique. The neuron spikes and brain area were also interesting to analyze. The part that made the most sense to me was the trend of left and right contrast and feedback type. Through this project, I learned a lot about different types of graphs that can be used to visualize the data and how to create a prediction model, despite the data becing very complex.
+
+### Acknowledgements:
+* ChatGPT - helped with writing code and interpretations for exploratory data analysis
+* DeepSeek - helped with writing code for data integration and prediction model
